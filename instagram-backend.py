@@ -36,7 +36,7 @@ def get_data():
         prompt = request.args.get('prompt')
 
         if ai is not None and prompt is not None:
-            response = ai.prompt(message= 'Generate an image of a' + prompt)
+            response = ai.prompt(message= 'Generate an image of ' + prompt)
         else:
             return None
 
