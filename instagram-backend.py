@@ -9,12 +9,14 @@ import uuid
 from datetime import timedelta
 from dotenv import load_dotenv
 import os
+from PIL import Image
+from io import BytesIO
 
 app = Flask(__name__)
 
 def init_firebase_app():
     try:
-        cred = credentials.Certificate('/etc/secrets/my_secret_config.json')
+        cred = credentials.Certificate('my_secret_config.json')
         storage_bucket = os.getenv('STORAGE_BUCKET')
         
         if storage_bucket is None:
@@ -25,9 +27,21 @@ def init_firebase_app():
         })
     except:
         return
+    
+def resize_image(image_bytes: bytes, new_width: int, new_height: int) -> bytes:
+    image = Image.open(BytesIO(image_bytes))
+    
+    resized_image = image.resize((new_width, new_height))
+    
+    buffer = BytesIO()
+    resized_image.save(buffer, format=image.format)
+    
+    return buffer.getvalue()
 
 def get_url(img_data):
     try:
+        img_data = resize_image(image_bytes=img_data, new_width=768, new_height=768)
+
         bucket = storage.bucket()
 
         blob = bucket.blob(f'generatedImages/{uuid.uuid4()}')
