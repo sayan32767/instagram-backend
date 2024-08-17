@@ -2,52 +2,94 @@ from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import requests
-from meta_ai_api import MetaAI
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import storage
+import uuid
+from datetime import timedelta
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
-
-fb_email = os.getenv('EMAIL')
-fb_password = os.getenv('PASSWORD')
-
 app = Flask(__name__)
 
-# Configure Flask-Limiter
-limiter = Limiter(
-    key_func=get_remote_address,  # Use the client's IP address for rate limiting
-    default_limits=["100 per hour"]  # Set a default rate limit for all routes
-)
-limiter.init_app(app)  # Initialize the limiter with the Flask app
-
-def try_login():
+def init_firebase_app():
     try:
-        ai = MetaAI(fb_email=fb_email, fb_password=fb_password)
+        cred = credentials.Certificate('my_secret_config.json')
+        storage_bucket = os.getenv('STORAGE_BUCKET')
+        
+        if storage_bucket is None:
+            return
+            
+        firebase_admin.initialize_app(cred, {
+            'storageBucket': storage_bucket
+        })
+    except:
+        return
+
+def get_url(img_data):
+    try:
+        bucket = storage.bucket()
+
+        blob = bucket.blob(f'generatedImages/{uuid.uuid4()}')
+        
+        blob.upload_from_string(img_data, content_type='image/jpeg')
+
+        expiration_time = timedelta(hours=1)
+
+        url = blob.generate_signed_url(expiration=expiration_time)
     except:
         return None
     else:
-        return ai
+        return url
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["100 per hour"]
+)
+
+load_dotenv()
+
+limiter.init_app(app)
+
+init_firebase_app()
 
 @app.route('/generate', methods=['GET'])
-@limiter.limit("1 per minute")  # Set a specific rate limit for this route
+@limiter.limit("1 per minute")
 def get_data(): 
     try:
-        ai = try_login()
         prompt = request.args.get('prompt')
 
-        if ai is not None and prompt is not None:
-            response = ai.prompt(message= 'Generate an image of ' + prompt)
-        else:
+        if prompt is None:
             return None
+        
+        url = os.getenv('BASE_URL') + prompt
 
-    except requests.exceptions.RequestException as e:
-        print(f"An error occurred: {e}")
+        if url is None:
+            return None
+        
+        response = requests.get(url)
+
+    except:
         return None
     
     else:
+        if response.status_code != 200:
+            return None
+        
+        download_url = get_url(response.content)
+
+        if download_url is None:
+            return None
+
         result = {
             'status': 'success',
-            'data': response
+            'data': {
+                'media': [
+                    {
+                        'url': download_url
+                    }
+                ]
+            }
         }
         return jsonify(result)
 
