@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 def init_firebase_app():
     try:
-        cred = credentials.Certificate('my_secret_config.json')
+        cred = credentials.Certificate('/etc/secrets/my_secret_config.json')
         storage_bucket = os.getenv('STORAGE_BUCKET')
         
         if storage_bucket is None:
