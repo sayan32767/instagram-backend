@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import os
 from PIL import Image
 from io import BytesIO
+import base64
 
 app = Flask(__name__)
 
@@ -106,6 +107,64 @@ def get_data():
             }
         }
         return jsonify(result)
+    
+
+
+
+def get_access_token():
+
+    CLIENT_ID = os.getenv('CLIENT_ID')
+    CLIENT_SECRET = os.getenv('CLIENT_SECRET')
+
+    auth_str = f"{CLIENT_ID}:{CLIENT_SECRET}"
+    b64_auth_str = base64.b64encode(auth_str.encode()).decode()
+
+    headers = {
+        'Authorization': f'Basic {b64_auth_str}',
+        'Content-Type': 'application/x-www-form-urlencoded',
+    }
+    data = {'grant_type': 'client_credentials'}
+
+    response = requests.post('https://accounts.spotify.com/api/token', headers=headers, data=data)
+
+    if response.status_code == 200:
+        return response.json()['access_token']
+    else:
+        raise Exception('Failed to get access token')
+
+
+
+@app.route('/search', methods=['GET'])
+def search_track():
+    query = request.args.get('query')
+
+    if not query:
+        return jsonify({"error": "Query parameter is required"}), 400
+
+    access_token = get_access_token()
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+    }
+    search_url = f'https://api.spotify.com/v1/search?q={query}&type=track'
+
+    response = requests.get(search_url, headers=headers)
+
+    if response.status_code == 200:
+        results = response.json()['tracks']['items']
+        track_data = [{
+            'name': track['name'],
+            'artist': track['artists'][0]['name'],
+            'album': track['album']['name'],
+            'album_art_url': track['album']['images'][0]['url'] if track['album']['images'] else None,
+            'preview_url': track['preview_url']
+        } for track in results if track['preview_url']]
+
+        return jsonify(track_data), 200
+    else:
+        return jsonify({"error": "Failed to search tracks"}), response.status_code
+
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
