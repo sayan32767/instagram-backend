@@ -1,2 +1,8 @@
 .env
 my_secret_config.json
+myenv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
