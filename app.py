@@ -54,23 +54,26 @@ def get_youtube_client():
 # ---------------- HELPERS ----------------
 
 
-def upload_generated_image(img_bytes: bytes):
-    """Upload generated image to Cloudinary with optimization."""
+def upload_generated_image(img_bytes: bytes, uid: str):
     try:
+        childName = "generatedImages"
+        image_id = str(uuid.uuid4())
+
         upload_result = cloudinary.uploader.upload(
             img_bytes,
-            public_id=f"generatedImages/{uuid.uuid4()}",
+            public_id=f"{childName}/{uid}/{image_id}",
+            asset_folder=childName,
             resource_type="image",
             overwrite=True,
-            transformation=[
-                {"width": 768, "height": 768, "crop": "fill"},
-                {"quality": "auto", "fetch_format": "auto"},
-            ],
+            unique_filename=False,
         )
+
         return upload_result["secure_url"]
 
-    except Exception:
+    except Exception as e:
+        print("Cloudinary error:", e)
         return None
+
 
 
 # ---------------- GENERATE ROUTE ----------------
@@ -83,6 +86,10 @@ def generate():
         prompt = request.args.get("prompt")
         if not prompt:
             return jsonify({"error": "Prompt required"}), 400
+        
+        uid = request.args.get("uid")
+        if not uid:
+            return jsonify({"error": "UID required"}), 400
 
         url = os.getenv("BASE_URL") + prompt
         response = requests.get(url, timeout=30)
@@ -90,7 +97,7 @@ def generate():
         if response.status_code != 200:
             return jsonify({"error": "Image generation failed"}), 500
 
-        cloudinary_url = upload_generated_image(response.content)
+        cloudinary_url = upload_generated_image(response.content, uid=uid)
 
         if not cloudinary_url:
             return jsonify({"error": "Upload failed"}), 500
