@@ -1,8 +1,12 @@
 .env
 my_secret_config.json
 myenv
+venv
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.log
+client_secret.json
+token.json
+generate_token.py
