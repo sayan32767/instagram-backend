@@ -317,6 +317,15 @@ def get_video_url(file_id):
         return jsonify({"error": str(e)}), 500
 
 
+# ----------------- HEALTH CHECK ----------------
+@app.route("/health")
+def health():
+    return jsonify({
+        "status": "ok",
+        "service": "reels-api"
+    }), 200
+
+
 # ---------------- RUN ----------------
 
 if __name__ == "__main__":
