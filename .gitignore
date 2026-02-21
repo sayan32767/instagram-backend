@@ -10,3 +10,5 @@ __pycache__/
 client_secret.json
 token.json
 generate_token.py
+deep_copy.py
+serviceAccountKey.json

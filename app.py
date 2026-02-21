@@ -1,4 +1,6 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Blueprint
+import firebase_admin
+from firebase_admin import credentials, firestore, auth
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import requests
@@ -12,19 +14,39 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+import bcrypt
 
 # ---------------- INIT ----------------
 load_dotenv()
 app = Flask(__name__)
 
-# 🔒 Max upload size (200MB)
-app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
+# 🔒 Max upload size (10MB)
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", 50))
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
 # 🔒 Rate limiter
 limiter = Limiter(get_remote_address, app=app, default_limits=["60 per minute"])
 
 # 🔒 Secret key for protected endpoints
 API_SECRET = os.getenv("UPLOAD_SECRET")
+
+
+
+
+
+
+# ---------------- FIREBASE INIT ----------------
+
+firebase_admin.initialize_app(
+    credentials.Certificate('serviceAccountKey.json')
+)
+
+group_bp = Blueprint("group", __name__)
+db = firestore.client()
+
+
+
+
 
 # ----------- CLOUDINARY CONFIG ----------
 cloudinary.config(
@@ -266,6 +288,34 @@ def upload_reel():
         return jsonify({"success": False, "error": "Video file required"}), 400
 
     video = request.files["video"]
+
+    # 🔒 Validate file type
+    filename = video.filename
+    ext = os.path.splitext(filename)[1].lower()
+
+    allowed = {".mp4", ".mov", ".avi", ".mkv"}
+
+    if video.filename == "":
+        return jsonify({"success": False, "error": "No file selected"}), 400
+
+    if ext not in allowed:
+        return jsonify({"success": False, "error": "Invalid file type"}), 400
+
+    # 🔒 Check file size safely
+    video.seek(0, os.SEEK_END)
+    file_size = video.tell()
+    video.seek(0)  # reset pointer back to start
+
+    max_size_mb = int(os.getenv("TELEGRAM_SIZE_LIMIT", 10))
+    max_size = max_size_mb * 1024 * 1024  # convert MB to bytes
+
+    if file_size > max_size:
+        return jsonify({
+            "success": False,
+            "error": f"Video too large. Max allowed is {max_size_mb} MB."
+        }), 413
+
+
     caption = request.form.get("caption", "")
 
     # Step 1: upload to Telegram
@@ -324,6 +374,206 @@ def health():
         "status": "ok",
         "service": "reels-api"
     }), 200
+
+
+
+
+
+
+# ----------------- FIREBASE UPLOAD ----------------
+def verify_token():
+    id_token = request.headers.get("Authorization")
+
+    if not id_token:
+        return None, ("Missing token", 401)
+
+    try:
+        decoded = auth.verify_id_token(id_token)
+        return decoded["uid"], None
+    except Exception:
+        return None, ("Invalid token", 401)
+
+
+# -------------------------
+# 🚀 CREATE GROUP
+# -------------------------
+@group_bp.route("/create-group", methods=["POST"])
+@limiter.limit("5 per minute")
+def create_group():
+    if request.headers.get("X-API-KEY") != API_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    uid, error = verify_token()
+    if error:
+        return jsonify({"error": error[0]}), error[1]
+
+    data = request.json
+    name = data.get("name", "").strip().lower()
+    password = data.get("password", "")
+
+    if not name or not password:
+        return jsonify({"error": "Missing fields"}), 400
+
+    if len(password) < 8:
+        return jsonify({"error": "Password too short"}), 400
+
+    hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+    user_doc = db.collection("user").document(uid).get()
+    if not user_doc.exists:
+        return jsonify({"error": "User not found"}), 404
+
+    user_data = user_doc.to_dict()
+    username = user_data.get("username", "")
+    photo_url = user_data.get("photoUrl", "")
+
+    group_ref = db.collection("groups").document(name)
+
+    tx = db.transaction()
+
+    @firestore.transactional
+    def transaction_create(tx):
+        group_snapshot = next(tx.get(group_ref))
+
+        # 🔥 Atomic uniqueness check
+        if group_snapshot.exists:
+            raise Exception("Group name already taken")
+
+        tx.set(group_ref, {
+            "name": name,
+            "passwordHash": hashed_pw,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "createdBy": {
+                "uid": uid,
+                "username": username,
+                "photoUrl": photo_url,
+            },
+        })
+
+        tx.set(
+            group_ref.collection("members").document(uid),
+            {
+                "role": "member",
+                "username": username,
+                "photoUrl": photo_url,
+                "joinedAt": firestore.SERVER_TIMESTAMP,
+            }
+        )
+
+        tx.set(
+            db.collection("user")
+            .document(uid)
+            .collection("groups")
+            .document(name),
+            {
+                "name": name,
+                "username": username,
+                "photoUrl": photo_url,
+                "role": "member",
+                "joinedAt": firestore.SERVER_TIMESTAMP,
+            }
+        )
+
+    try:
+        transaction_create(tx)
+        return jsonify({"success": True, "groupId": name}), 200
+    except Exception as e:
+        if "taken" in str(e):
+            return jsonify({"error": "Group name already taken"}), 400
+        print("Error creating group:", e)
+        return jsonify({"error": "Server error"}), 500
+
+
+# -------------------------
+# 🚀 JOIN GROUP
+# -------------------------
+@group_bp.route("/join-group", methods=["POST"])
+@limiter.limit("10 per minute")
+def join_group():
+    if request.headers.get("X-API-KEY") != API_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    uid, error = verify_token()
+    if error:
+        return jsonify({"error": error[0]}), error[1]
+
+    data = request.json
+    name = data.get("name", "").strip().lower()
+    password = data.get("password", "")
+
+    if not name or not password:
+        return jsonify({"error": "Missing fields"}), 400
+
+    group_ref = db.collection("groups").document(name)
+    group_doc = group_ref.get()
+
+    if not group_doc.exists:
+        return jsonify({"error": "Group not found"}), 404
+
+    group_data = group_doc.to_dict()
+    stored_hash = group_data.get("passwordHash")
+
+    if not stored_hash:
+        return jsonify({"error": "Corrupted group"}), 500
+
+    if not bcrypt.checkpw(password.encode(), stored_hash.encode()):
+        return jsonify({"error": "Incorrect password"}), 403
+
+    user_doc = db.collection("user").document(uid).get()
+    if not user_doc.exists:
+        return jsonify({"error": "User not found"}), 404
+
+    user_data = user_doc.to_dict()
+    username = user_data.get("username", "")
+    photo_url = user_data.get("photoUrl", "")
+
+    tx = db.transaction()
+
+    @firestore.transactional
+    def transaction_join(tx):
+        member_ref = group_ref.collection("members").document(uid)
+        user_group_ref = (
+            db.collection("user")
+            .document(uid)
+            .collection("groups")
+            .document(name)
+        )
+
+        # 🔥 ALL READS FIRST
+        member_snapshot = next(tx.get(member_ref))
+        user_group_snapshot = next(tx.get(user_group_ref))
+
+        if not member_snapshot.exists:
+            tx.set(member_ref, {
+                "role": "member",
+                "username": username,
+                "photoUrl": photo_url,
+                "joinedAt": firestore.SERVER_TIMESTAMP,
+            })
+
+        if not user_group_snapshot.exists:
+            tx.set(user_group_ref, {
+                "name": name,
+                "username": username,
+                "photoUrl": photo_url,
+                "role": "member",
+                "joinedAt": firestore.SERVER_TIMESTAMP,
+            })
+
+    try:
+        transaction_join(tx)
+        return jsonify({"success": True, "groupId": name}), 200
+    except Exception as e:
+        print("Error joining group:", e)
+        return jsonify({"error": "Server error"}), 500
+
+
+
+
+# --------------------- REGISTER BLUEPRINTS ----------------
+app.register_blueprint(group_bp)
+
+
 
 
 # ---------------- RUN ----------------
