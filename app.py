@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, Blueprint
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
+from firebase_admin.firestore import ArrayUnion
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import requests
@@ -446,8 +447,9 @@ def create_group():
             "createdBy": {
                 "uid": uid,
                 "username": username,
-                "photoUrl": photo_url,
+                # "photoUrl": photo_url,
             },
+            "memberIds": ArrayUnion([uid]),
         })
 
         tx.set(
@@ -455,7 +457,8 @@ def create_group():
             {
                 "role": "member",
                 "username": username,
-                "photoUrl": photo_url,
+                "uid": uid,
+                # "photoUrl": photo_url,
                 "joinedAt": firestore.SERVER_TIMESTAMP,
             }
         )
@@ -468,7 +471,7 @@ def create_group():
             {
                 "name": name,
                 "username": username,
-                "photoUrl": photo_url,
+                # "photoUrl": photo_url,
                 "role": "member",
                 "joinedAt": firestore.SERVER_TIMESTAMP,
             }
@@ -525,7 +528,7 @@ def join_group():
 
     user_data = user_doc.to_dict()
     username = user_data.get("username", "")
-    photo_url = user_data.get("photoUrl", "")
+    # photo_url = user_data.get("photoUrl", "")
 
     tx = db.transaction()
 
@@ -538,16 +541,19 @@ def join_group():
             .collection("groups")
             .document(name)
         )
+        _group_ref = db.collection("groups").document(name)
 
         # 🔥 ALL READS FIRST
         member_snapshot = next(tx.get(member_ref))
         user_group_snapshot = next(tx.get(user_group_ref))
+        group_snapshot = next(tx.get(_group_ref))
 
         if not member_snapshot.exists:
             tx.set(member_ref, {
                 "role": "member",
                 "username": username,
-                "photoUrl": photo_url,
+                "uid": uid,
+                # "photoUrl": photo_url,
                 "joinedAt": firestore.SERVER_TIMESTAMP,
             })
 
@@ -555,10 +561,14 @@ def join_group():
             tx.set(user_group_ref, {
                 "name": name,
                 "username": username,
-                "photoUrl": photo_url,
+                # "photoUrl": photo_url,
                 "role": "member",
                 "joinedAt": firestore.SERVER_TIMESTAMP,
             })
+
+        tx.update(_group_ref, {
+            "memberIds": ArrayUnion([uid])
+        })
 
     try:
         transaction_join(tx)
